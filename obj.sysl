@@ -1,0 +1,57 @@
+// A small Wavefront OBJ reader: the vertices and faces of a mesh, and nothing else of the format.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{fields, parse_int, parse_real, split}
+
+/** Why an OBJ file was refused, with the line it was refused at (from 1). */
+enum ObjError
+    BadNumber(line: int)
+    BadIndex(line: int)
+    ShortFace(line: int)
+
+impl Display for ObjError
+    display(self, out: *Writer, fmt: FormatSpec)
+        val text = self match
+            BadNumber(l) -> s"line $l: not a number"
+            BadIndex(l) -> s"line $l: a face names a vertex that does not exist"
+            ShortFace(l) -> s"line $l: a face needs three vertices"
+        out.write(text.bytes)
+
+/** The triangles of the mesh in `text`, each vertex scaled by `scale` and then moved by `offset`.
+ *
+ * `v x y z` lines are vertices and `f` lines faces; a face with more than three corners is fanned
+ * into triangles from its first. A corner may be `i`, `i/t`, `i//n` or `i/t/n` -- only `i` is used --
+ * and a negative `i` counts back from the latest vertex. Every other kind of line is skipped.
+ */
+read_obj(text: string, scale: real, offset: Vec3, mat: &sync Material) -> Result[Buf[&sync Hittable], ObjError]
+    val verts = buf[Vec3]()
+    val tris: Buf[&sync Hittable] = buf()
+    var line_no = 0
+
+    for line in split(text, "\n")
+        line_no += 1
+        val f = fields(line)
+
+        if f.len == 0 then continue
+
+        if f[0] == "v"
+            if f.len < 4 then return Err(BadNumber(line_no))
+            val x = parse_real(f[1]).map_err((e) -> BadNumber(line_no))?
+            val y = parse_real(f[2]).map_err((e) -> BadNumber(line_no))?
+            val z = parse_real(f[3]).map_err((e) -> BadNumber(line_no))?
+            verts.push(Vec3(x, y, z) * scale + offset)
+        else if f[0] == "f"
+            if f.len < 4 then return Err(ShortFace(line_no))
+
+            var idx: []usize = [0; f.len - 1]
+            for k in 1..<f.len
+                val n = parse_int(split(f[k], "/")[0]).map_err((e) -> BadNumber(line_no))?
+                val resolved = if n < 0 then int(verts.len()) + n else n - 1
+                if resolved < 0 || resolved >= int(verts.len()) then return Err(BadIndex(line_no))
+                idx[k - 1] = usize(resolved)
+
+            for k in 1..<idx.len - 1
+                tris.push(Triangle.of(verts.at(idx[0]), verts.at(idx[k]), verts.at(idx[k + 1]), mat))
+
+    Ok(tris)
+end read_obj

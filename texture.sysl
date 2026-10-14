@@ -1,0 +1,140 @@
+// Textures: a colour as a function of where a surface was hit, by its (u, v) coordinates or by the
+// point in space.
+
+import sysl.math.Float
+import sysl.rand.{Rng, rng}
+
+trait Texture
+    value(self, u: real, v: real, p: Vec3) -> Vec3
+
+struct Solid
+    color: Vec3
+
+impl Texture for Solid
+    value(self, u: real, v: real, p: Vec3) -> Vec3 = self.color
+
+/** A solid checker in space: cubes of side `scale` alternating between two textures. Being a
+ * function of the point rather than of (u, v), it has no seams on a sphere.
+ */
+struct Checker
+    inv_scale: real
+    even: &sync Texture
+    odd: &sync Texture
+
+    of(scale: real, even: Vec3, odd: Vec3) -> Checker = Checker(1.0 / scale, Solid(even), Solid(odd))
+
+impl Texture for Checker
+    value(self, u: real, v: real, p: Vec3) -> Vec3
+        val x = int((self.inv_scale * p.x).floor())
+        val y = int((self.inv_scale * p.y).floor())
+        val z = int((self.inv_scale * p.z).floor())
+
+        if (x + y + z) % 2 == 0 then self.even.value(u, v, p) else self.odd.value(u, v, p)
+
+/** A picture wrapped by (u, v): `u` across from the left, `v` up from the bottom. The samples are
+ * eight-bit RGB, row-major from the top, converted from sRGB to linear light as they are read.
+ */
+struct ImageTexture
+    width: int
+    height: int
+    rgb: []u8
+
+impl Texture for ImageTexture
+    value(self, u: real, v: real, p: Vec3) -> Vec3
+        if self.height <= 0 then return Vec3(0.0, 1.0, 1.0)
+
+        val uu = Interval(0.0, 1.0).clamp(u)
+        val vv = 1.0 - Interval(0.0, 1.0).clamp(v)
+        val i = min_int(int(uu * real(self.width)), self.width - 1)
+        val j = min_int(int(vv * real(self.height)), self.height - 1)
+        val at = (j * self.width + i) * 3
+
+        Vec3(to_linear(self.rgb[at]), to_linear(self.rgb[at + 1]), to_linear(self.rgb[at + 2]))
+    end value
+
+private min_int(a: int, b: int) -> int = if a < b then a else b
+
+/** An eight-bit sRGB sample as linear light, by the gamma-2 curve the output is written with. */
+to_linear(b: u8) -> real
+    val s = real(b) / 255.0
+    s * s
+
+/** Ken Perlin's gradient noise, as Shirley builds it: 256 random unit vectors and three permutations
+ * of 0..255, all drawn from a seeded generator so that the same seed is the same marble.
+ */
+struct Perlin
+    vecs: [256]Vec3
+    px: [256]int
+    py: [256]int
+    pz: [256]int
+
+    of(seed: u64) -> Perlin
+        var g = rng(seed, 7)
+        var vecs: [256]Vec3 = [Vec3.zero(); 256]
+
+        for i in 0..<256
+            vecs[i] = Vec3(uniform(&g, -1.0, 1.0), uniform(&g, -1.0, 1.0), uniform(&g, -1.0, 1.0)).unit()
+
+        Perlin(vecs, permutation(&g), permutation(&g), permutation(&g))
+    end of
+
+    /** Noise in about [-1, 1], smooth in `p`. */
+    noise(self, p: Vec3) -> real
+        val fx = p.x.floor()
+        val fy = p.y.floor()
+        val fz = p.z.floor()
+        val u = p.x - fx
+        val v = p.y - fy
+        val w = p.z - fz
+        val i = int(fx)
+        val j = int(fy)
+        val k = int(fz)
+        val uu = u * u * (3.0 - 2.0 * u)
+        val vv = v * v * (3.0 - 2.0 * v)
+        val ww = w * w * (3.0 - 2.0 * w)
+        var acc = 0.0
+
+        for di in 0..<2
+            for dj in 0..<2
+                for dk in 0..<2
+                    val g = self.vecs[self.px[(i + di) & 255] ^ self.py[(j + dj) & 255] ^ self.pz[(k + dk) & 255]]
+                    val a = real(di)
+                    val b = real(dj)
+                    val c = real(dk)
+                    val weight = Vec3(u - a, v - b, w - c)
+
+                    acc += (a * uu + (1.0 - a) * (1.0 - uu)) * (b * vv + (1.0 - b) * (1.0 - vv)) *
+                        (c * ww + (1.0 - c) * (1.0 - ww)) * g.dot(weight)
+
+        acc
+    end noise
+
+    /** Turbulence: `depth` octaves of noise, each twice the frequency and half the weight. */
+    turb(self, p: Vec3, depth: int) -> real
+        var acc = 0.0
+        var q = p
+        var weight = 1.0
+
+        for _ in 0..<depth
+            acc += weight * self.noise(q)
+            weight *= 0.5
+            q = q * 2.0
+
+        acc.abs()
+    end turb
+
+private permutation(g: *Rng) -> [256]int
+    var p: [256]int = [0; 256]
+    for i in 0..<256
+        p[i] = i
+    g.shuffle(p[..])
+    p
+
+/** Marble: a sine along z whose phase is perturbed by turbulence. */
+struct Marble
+    noise: Perlin
+    scale: real
+
+impl Texture for Marble
+    value(self, u: real, v: real, p: Vec3) -> Vec3 =
+        Vec3.splat(0.5) * (1.0 + (self.scale * p.z + 10.0 * self.noise.turb(p, 7)).sin())

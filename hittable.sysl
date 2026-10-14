@@ -1,0 +1,122 @@
+// What a ray can hit, and what it learns when it does.
+
+import sysl.buf.Buf
+
+/** Where a ray met a surface: the point, the normal facing back against the ray, the material there
+ * and the surface coordinates a texture is looked up by.
+ */
+struct Hit
+    p: Vec3
+    normal: Vec3
+    mat: &sync Material
+    t: real
+    u: real
+    v: real
+    front_face: bool
+
+    /** A hit whose normal is set from the surface's outward normal so that it always faces the ray,
+     * recording which side was struck -- which is what a dielectric needs to know whether it is
+     * entering or leaving.
+     */
+    facing(r: Ray, t: real, p: Vec3, outward: Vec3, mat: &sync Material, u: real, v: real) -> Hit
+        val front = r.dir.dot(outward) < 0.0
+        Hit(p, if front then outward else -outward, mat, t, u, v, front)
+
+/** Anything a ray can be tested against: a primitive, an instance, a list, a BVH node.
+ *
+ * **Shared between the render threads**, so every object is allocated as a `&sync` and the scene is
+ * a tree of `&sync Hittable`: its counts are atomic, and nothing in it is written after it is built.
+ */
+trait Hittable
+    /** The nearest hit with `t` strictly inside `ray_t`, if there is one. */
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+
+    /** A box that contains every point the object can be hit at, over the whole shutter interval. */
+    bbox(self) -> Aabb
+
+/** An axis-aligned box, the bound a BVH is built from. Each axis is padded to at least `delta` thick,
+ * so that a quad lying in a coordinate plane still has a box a ray can enter.
+ */
+struct Aabb
+    x: Interval
+    y: Interval
+    z: Interval
+
+    empty() -> Aabb = Aabb(Interval.empty(), Interval.empty(), Interval.empty())
+
+    /** The box with `a` and `b` at opposite corners, in either order. */
+    corners(a: Vec3, b: Vec3) -> Aabb =
+        Aabb(Interval(a.x, b.x).ordered(), Interval(a.y, b.y).ordered(), Interval(a.z, b.z).ordered()).padded()
+
+    hull(a: Aabb, b: Aabb) -> Aabb =
+        Aabb(Interval.hull(a.x, b.x), Interval.hull(a.y, b.y), Interval.hull(a.z, b.z))
+
+    axis(self, n: int) -> Interval = if n == 1 then self.y else if n == 2 then self.z else self.x
+
+    /** 0, 1 or 2: the axis along which the box is widest -- the one a BVH splits. */
+    longest_axis(self) -> int
+        if self.x.size() > self.y.size()
+            if self.x.size() > self.z.size() then 0 else 2
+        else
+            if self.y.size() > self.z.size() then 1 else 2
+
+    padded(self) -> Aabb
+        val delta = 0.0001
+        Aabb(self.x.at_least(delta), self.y.at_least(delta), self.z.at_least(delta))
+
+    shifted(self, by: Vec3) -> Aabb =
+        Aabb(self.x.shifted(by.x), self.y.shifted(by.y), self.z.shifted(by.z))
+
+    /** Whether `r` passes through the box at some `t` inside `ray_t`: the slab test, one axis at a
+     * time, narrowing the interval until it is empty or the axes are done.
+     */
+    hit(self, r: Ray, ray_t: Interval) -> bool
+        var lo = ray_t.lo
+        var hi = ray_t.hi
+
+        for a in 0..<3
+            val ax = self.axis(a)
+            val inv = 1.0 / r.dir.axis(a)
+            val t0 = (ax.lo - r.origin.axis(a)) * inv
+            val t1 = (ax.hi - r.origin.axis(a)) * inv
+
+            if t0 < t1
+                if t0 > lo then lo = t0
+                if t1 < hi then hi = t1
+            else
+                if t1 > lo then lo = t1
+                if t0 < hi then hi = t0
+
+            if hi <= lo then return false
+
+        true
+    end hit
+
+/** Several hittables tested one after another, keeping the nearest hit: what a scene is before it
+ * has a BVH, and what the BVH tests check it against.
+ */
+struct HitList
+    items: Buf[&sync Hittable]
+
+    add(self, h: &sync Hittable) = self.items.push(h)
+
+impl Hittable for HitList
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        var best: Option[Hit] = None
+        var closest = ray_t.hi
+
+        for i in 0..<self.items.len()
+            self.items.at(i).hit(r, Interval(ray_t.lo, closest)) match
+                Some(h) ->
+                    closest = h.t
+                    best = Some(h)
+                None -> ()
+
+        best
+    end hit
+
+    bbox(self) -> Aabb
+        var b = Aabb.empty()
+        for i in 0..<self.items.len()
+            b = Aabb.hull(b, self.items.at(i).bbox())
+        b

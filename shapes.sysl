@@ -1,0 +1,217 @@
+// The primitives -- spheres, parallelograms and triangles -- and the two instancing transforms the
+// Cornell box is built with.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+
+/** A sphere, possibly moving: its centre travels along `center` from `t = 0` to `t = 1` of the
+ * shutter, which is what motion blur samples.
+ */
+struct Sphere
+    center: Ray
+    radius: real
+    mat: &sync Material
+
+    still(c: Vec3, radius: real, mat: &sync Material) -> Sphere =
+        Sphere(Ray(c, Vec3.zero(), 0.0), radius, mat)
+
+    moving(from: Vec3, to: Vec3, radius: real, mat: &sync Material) -> Sphere =
+        Sphere(Ray(from, to - from, 0.0), radius, mat)
+
+/** Where the outward unit normal `p` of a unit sphere falls on the (u, v) square: `u` around the
+ * y axis from -x, `v` from the south pole to the north.
+ */
+sphere_uv(p: Vec3) -> (real, real)
+    val theta = (-p.y).acos()
+    val phi = (-p.z).atan2(p.x) + real.pi()
+    (phi / (2.0 * real.pi()), theta / real.pi())
+
+impl Hittable for Sphere
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        val c = self.center.at(r.time)
+        val oc = c - r.origin
+        val a = r.dir.length_squared()
+        val h = r.dir.dot(oc)
+        val disc = h * h - a * (oc.length_squared() - self.radius * self.radius)
+
+        if disc < 0.0 then return None
+
+        val sq = disc.sqrt()
+        var root = (h - sq) / a
+
+        if !ray_t.surrounds(root)
+            root = (h + sq) / a
+            if !ray_t.surrounds(root) then return None
+
+        val p = r.at(root)
+        val outward = (p - c) / self.radius
+        val uv = sphere_uv(outward)
+
+        Some(Hit.facing(r, root, p, outward, self.mat, uv.0, uv.1))
+    end hit
+
+    bbox(self) -> Aabb
+        val rv = Vec3.splat(self.radius)
+        val c0 = self.center.at(0.0)
+        val c1 = self.center.at(1.0)
+        Aabb.hull(Aabb.corners(c0 - rv, c0 + rv), Aabb.corners(c1 - rv, c1 + rv))
+
+/** The parallelogram with corner `q` and edges `u` and `v`. */
+struct Quad
+    q: Vec3
+    u: Vec3
+    v: Vec3
+    mat: &sync Material
+    normal: Vec3
+    d: real
+    w: Vec3
+
+    of(q: Vec3, u: Vec3, v: Vec3, mat: &sync Material) -> Quad
+        val n = u.cross(v)
+        val normal = n.unit()
+        Quad(q, u, v, mat, normal, normal.dot(q), n / n.dot(n))
+
+impl Hittable for Quad
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        val denom = self.normal.dot(r.dir)
+
+        if denom.abs() < 0.00000001 then return None
+
+        val t = (self.d - self.normal.dot(r.origin)) / denom
+
+        if !ray_t.contains(t) then return None
+
+        val p = r.at(t)
+        val planar = p - self.q
+        val alpha = self.w.dot(planar.cross(self.v))
+        val beta = self.w.dot(self.u.cross(planar))
+
+        if alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0 then return None
+
+        Some(Hit.facing(r, t, p, self.normal, self.mat, alpha, beta))
+    end hit
+
+    bbox(self) -> Aabb =
+        Aabb.hull(Aabb.corners(self.q, self.q + self.u + self.v), Aabb.corners(self.q + self.u, self.q + self.v))
+
+/** The triangle `a b c`, intersected by Möller and Trumbore's method: one cross product, one
+ * determinant and the barycentric coordinates `(u, v)` of the hit, which are also its surface
+ * coordinates.
+ */
+struct Triangle
+    a: Vec3
+    e1: Vec3
+    e2: Vec3
+    normal: Vec3
+    mat: &sync Material
+
+    of(a: Vec3, b: Vec3, c: Vec3, mat: &sync Material) -> Triangle =
+        Triangle(a, b - a, c - a, (b - a).cross(c - a).unit(), mat)
+
+impl Hittable for Triangle
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        val pv = r.dir.cross(self.e2)
+        val det = self.e1.dot(pv)
+
+        if det.abs() < 0.000000000001 then return None
+
+        val inv = 1.0 / det
+        val tv = r.origin - self.a
+        val u = tv.dot(pv) * inv
+
+        if u < 0.0 || u > 1.0 then return None
+
+        val qv = tv.cross(self.e1)
+        val v = r.dir.dot(qv) * inv
+
+        if v < 0.0 || u + v > 1.0 then return None
+
+        val t = self.e2.dot(qv) * inv
+
+        if !ray_t.surrounds(t) then return None
+
+        Some(Hit.facing(r, t, r.at(t), self.normal, self.mat, u, v))
+    end hit
+
+    bbox(self) -> Aabb =
+        Aabb.hull(Aabb.corners(self.a, self.a + self.e1), Aabb.corners(self.a, self.a + self.e2))
+
+/** The six faces of the box with opposite corners `a` and `b`, as one BVH. */
+cuboid(a: Vec3, b: Vec3, mat: &sync Material) -> &sync Hittable
+    val lo = a.min(b)
+    val hi = a.max(b)
+    val dx = Vec3(hi.x - lo.x, 0.0, 0.0)
+    val dy = Vec3(0.0, hi.y - lo.y, 0.0)
+    val dz = Vec3(0.0, 0.0, hi.z - lo.z)
+    val sides: Buf[&sync Hittable] = buf()
+
+    sides.push(Quad.of(Vec3(lo.x, lo.y, hi.z), dx, dy, mat))
+    sides.push(Quad.of(Vec3(hi.x, lo.y, hi.z), -dz, dy, mat))
+    sides.push(Quad.of(Vec3(hi.x, lo.y, lo.z), -dx, dy, mat))
+    sides.push(Quad.of(Vec3(lo.x, lo.y, lo.z), dz, dy, mat))
+    sides.push(Quad.of(Vec3(lo.x, hi.y, hi.z), dx, -dz, mat))
+    sides.push(Quad.of(Vec3(lo.x, lo.y, lo.z), dx, dz, mat))
+
+    bvh(sides)
+end cuboid
+
+/** `inner` moved by `offset`: the ray is moved the other way, and the hit back. */
+struct Translate
+    inner: &sync Hittable
+    offset: Vec3
+    bounds: Aabb
+
+    of(inner: &sync Hittable, offset: Vec3) -> Translate = Translate(inner, offset, inner.bbox().shifted(offset))
+
+impl Hittable for Translate
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        val moved = Ray(r.origin - self.offset, r.dir, r.time)
+
+        self.inner.hit(moved, ray_t) match
+            Some(h) -> Some(Hit(h.p + self.offset, h.normal, h.mat, h.t, h.u, h.v, h.front_face))
+            None -> None
+
+    bbox(self) -> Aabb = self.bounds
+
+/** `inner` turned by `degrees` about the y axis. */
+struct RotateY
+    inner: &sync Hittable
+    sin: real
+    cos: real
+    bounds: Aabb
+
+    of(inner: &sync Hittable, degrees: real) -> RotateY
+        val th = degrees.to_radians()
+        val s = th.sin()
+        val c = th.cos()
+        val b = inner.bbox()
+        var lo = Vec3.splat(real.infinity())
+        var hi = Vec3.splat(-real.infinity())
+
+        for i in 0..<2
+            for j in 0..<2
+                for k in 0..<2
+                    val x = if i == 1 then b.x.hi else b.x.lo
+                    val y = if j == 1 then b.y.hi else b.y.lo
+                    val z = if k == 1 then b.z.hi else b.z.lo
+                    val corner = Vec3(c * x + s * z, y, -s * x + c * z)
+                    lo = lo.min(corner)
+                    hi = hi.max(corner)
+
+        RotateY(inner, s, c, Aabb.corners(lo, hi))
+    end of
+
+    // Into the object's frame (by -θ) and out of it (by +θ).
+    into(self, v: Vec3) -> Vec3 = Vec3(self.cos * v.x - self.sin * v.z, v.y, self.sin * v.x + self.cos * v.z)
+
+    out(self, v: Vec3) -> Vec3 = Vec3(self.cos * v.x + self.sin * v.z, v.y, -self.sin * v.x + self.cos * v.z)
+
+impl Hittable for RotateY
+    hit(self, r: Ray, ray_t: Interval) -> Option[Hit]
+        val turned = Ray(self.into(r.origin), self.into(r.dir), r.time)
+
+        self.inner.hit(turned, ray_t) match
+            Some(h) -> Some(Hit(self.out(h.p), self.out(h.normal), h.mat, h.t, h.u, h.v, h.front_face))
+            None -> None
+
+    bbox(self) -> Aabb = self.bounds

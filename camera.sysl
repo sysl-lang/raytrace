@@ -1,0 +1,175 @@
+// The camera, the integrator, and rendering the rows of an image on a pool of threads.
+
+import sysl.math.{Float, max, min}
+import sysl.rand.{Rng, rng}
+import sysl.sync.Atomic
+import sysl.threads.{Thread, spawn}
+
+/** Where the camera stands and what it sees through: the lens is a thin one whose aperture is the
+ * cone `defocus_angle` degrees wide at the focus plane, `focus_dist` away. An angle of zero is a
+ * pinhole, with everything in focus.
+ */
+struct View
+    look_from: Vec3
+    look_at: Vec3
+    vup: Vec3
+    vfov: real
+    defocus_angle: real
+    focus_dist: real
+
+/** How the image is made: its size, the samples per pixel, the path length, and whether a path is
+ * ended early by Russian roulette (unbiased: a surviving path is reweighted by the odds it beat).
+ */
+struct Settings
+    width: int
+    height: int
+    spp: int
+    max_depth: int
+    roulette: bool
+    background: Vec3
+    seed: u64
+
+struct Camera
+    s: Settings
+    defocus_angle: real
+    center: Vec3
+    pixel00: Vec3
+    du: Vec3
+    dv: Vec3
+    disk_u: Vec3
+    disk_v: Vec3
+
+    of(view: View, s: Settings) -> Camera
+        val h = (view.vfov.to_radians() / 2.0).tan()
+        val vp_h = 2.0 * h * view.focus_dist
+        val vp_w = vp_h * real(s.width) / real(s.height)
+        val w = (view.look_from - view.look_at).unit()
+        val u = view.vup.cross(w).unit()
+        val v = w.cross(u)
+        val du = u * (vp_w / real(s.width))
+        val dv = -v * (vp_h / real(s.height))
+        val upper_left = view.look_from - w * view.focus_dist - u * (vp_w / 2.0) + v * (vp_h / 2.0)
+        val radius = view.focus_dist * (view.defocus_angle / 2.0).to_radians().tan()
+
+        Camera(s, view.defocus_angle, view.look_from, upper_left + (du + dv) * 0.5, du, dv, u * radius, v * radius)
+    end of
+
+    /** A ray through a random point of pixel (i, j), from a random point of the lens, at a random
+     * instant of the shutter.
+     */
+    get_ray(self, i: int, j: int, g: *Rng) -> Ray
+        val ox = g.unit() - 0.5
+        val oy = g.unit() - 0.5
+        val sample = self.pixel00 + self.du * (real(i) + ox) + self.dv * (real(j) + oy)
+
+        val origin = if self.defocus_angle <= 0.0
+            self.center
+        else
+            val d = random_in_unit_disk(g)
+            self.center + self.disk_u * d.x + self.disk_v * d.y
+
+        Ray(origin, sample - origin, g.unit())
+    end get_ray
+
+    /** The light arriving back along `r`: the path is followed bounce by bounce, carrying the product
+     * of the attenuations so far, and each surface's emission is added in at that weight.
+     */
+    trace(self, r: Ray, world: &sync Hittable, g: *Rng) -> Vec3
+        var color = Vec3.zero()
+        var through = Vec3.splat(1.0)
+        var ray = r
+
+        for depth in 0..<self.s.max_depth
+            val h = world.hit(ray, Interval(0.001, real.infinity())) match
+                Some(h) -> h
+                None -> return color + through * self.s.background
+
+            color = color + through * h.mat.emitted(h.u, h.v, h.p)
+
+            val sc = h.mat.scatter(ray, h, g) match
+                Some(sc) -> sc
+                None -> return color
+
+            through = through * sc.attenuation
+            ray = sc.ray
+
+            if self.s.roulette && depth >= 3
+                val p = min(max(max(through.x, through.y), through.z), 0.95)
+                if g.unit() >= p then return color
+                through = through / p
+
+        color
+    end trace
+
+    /** The averaged colour of pixel (i, j). Every sample has its own generator, keyed by the pixel and
+     * the sample's number, so a pixel's value does not depend on which thread drew it or in what order.
+     */
+    pixel(self, i: int, j: int, world: &sync Hittable) -> Vec3
+        var sum = Vec3.zero()
+        val key = u64(j * self.s.width + i)
+
+        for n in 0..<self.s.spp
+            var g = rng(self.s.seed + u64(n), key)
+            sum = sum + self.trace(self.get_ray(i, j, &g), world, &g)
+
+        sum / real(self.s.spp)
+    end pixel
+
+/** How many of the rays through the pixels' centres hit anything, on this thread: the measure of
+ * intersection speed alone, with no sampling and no shading.
+ */
+primary_hits(world: &sync Hittable, cam: Camera) -> int
+    var hits = 0
+
+    for j in 0..<cam.s.height
+        for i in 0..<cam.s.width
+            val p = cam.pixel00 + cam.du * real(i) + cam.dv * real(j)
+            if world.hit(Ray(cam.center, p - cam.center, 0.0), Interval(0.001, real.infinity())).is_some()
+                hits += 1
+
+    hits
+end primary_hits
+
+// What every worker shares: the scene, the camera, the next row nobody has taken, and the image the
+// rows are written into. Each row is written by exactly one thread, so the image needs no lock.
+private struct Job
+    world: &sync Hittable
+    cam: Camera
+    next: Atomic[int]
+    out: *Vec3
+
+private work(j: *Job) -> unit
+    val w = j.cam.s.width
+
+    loop
+        val y = j.next.add(1)
+        if y >= j.cam.s.height then return
+
+        for x in 0..<w
+            j.out[y * w + x] = j.cam.pixel(x, y, j.world)
+
+/** The image, row-major from the top, in linear light: `threads` workers take rows from a shared
+ * counter until there are none left. One thread is the calling one, with nothing spawned.
+ */
+render(world: &sync Hittable, cam: Camera, threads: int) -> []Vec3
+    var pixels: []Vec3 = [Vec3.zero(); cam.s.width * cam.s.height]
+    var job = Job(world, cam, Atomic(0), &pixels[0])
+
+    if threads <= 1
+        work(&job)
+        return pixels
+
+    var pool: []Option[Thread] = [None; threads]
+
+    for i in 0..<threads
+        pool[i] = spawn(&work, &job)
+
+    for t in pool
+        t match
+            Some(th) -> th.join()
+            None -> ()
+
+    // A thread that did not start left its rows to the others; this one finishes whatever is left.
+    work(&job)
+    pixels
+end render

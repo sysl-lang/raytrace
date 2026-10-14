@@ -1,0 +1,28 @@
+// A path tracer in sysl, in the scope of Peter Shirley's "Ray Tracing in One Weekend" and "Ray Tracing:
+// The Next Week": spheres, quads and triangle meshes, Lambertian, metal, dielectric and emissive
+// materials as trait objects, a thin-lens camera, a BVH, checker, image and Perlin textures, and rows
+// rendered on a pool of threads with a result that does not depend on how many.
+//
+//     sysl run . -- cornell -w 300 -h 300 -s 200 -o cornell.png
+
+package {
+  name    = "raytrace"
+  version = "0.1.0"
+  sysl    = "0.1.0-alpha.12"
+}
+
+optimization = "2"
+
+// **`os` and `heap`** for the threads, the scene's objects and the output file; **no `posix`**, since
+// everything here goes through the standard library's own threads and files.
+requires {
+  os   = true
+  heap = true
+}
+
+// `png` reads the textures and reads back what this program writes; `cairo` encodes the PNGs, the
+// `png` package being a reader only.
+dependencies {
+  cairo { git = "github.com/sysl-lang/cairo", version = "0.3.3" }
+  png   { git = "github.com/sysl-lang/png", version = "0.1.1" }
+}

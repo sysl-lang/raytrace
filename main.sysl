@@ -1,0 +1,84 @@
+// `raytrace [scene] [options]` -- render `showcase` or `cornell` to a PNG or PPM file.
+//
+//   -w N, -h N   the image's width and height (400 x 225)
+//   -s N         samples per pixel (64)
+//   -d N         the longest path, in bounces (20)
+//   -t N         render threads (every core)
+//   -o FILE      where to write it: `.ppm` for a PPM, anything else for a PNG (`out.png`)
+//   --roulette   end paths early by Russian roulette after three bounces
+//   --rays       measure primary-ray throughput instead: one hit per pixel, no shading
+
+import sysl.cpu_count
+import sysl.fs.write_bytes
+import sysl.text.{Search, parse_int}
+import sysl.time.monotonic
+
+private struct Options
+    scene: string
+    width: int
+    height: int
+    spp: int
+    depth: int
+    threads: int
+    out: string
+    roulette: bool
+    rays: bool
+
+private parse(args: []string) -> Options
+    var o = Options("showcase", 400, 225, 64, 20, int(cpu_count()), "out.png", false, false)
+    var i: usize = 1
+
+    while i < args.len
+        val a = args[i]
+        val next = if i + 1 < args.len then args[i + 1] else ""
+        val n = parse_int(next).unwrap_or(0)
+
+        if a == "-w" then o.width = n
+        else if a == "-h" then o.height = n
+        else if a == "-s" then o.spp = n
+        else if a == "-d" then o.depth = n
+        else if a == "-t" then o.threads = n
+        else if a == "-o" then o.out = next
+        else if a == "--roulette"
+            o.roulette = true
+            i -= 1
+        else if a == "--rays"
+            o.rays = true
+            i -= 1
+        else
+            o.scene = a
+            i -= 1
+
+        i += 2
+
+    o
+end parse
+
+main(args: []string)
+    val o = parse(args)
+    val sc = scene_named(o.scene) match
+        Some(s) -> s
+        None ->
+            print(s"raytrace: no scene called '${o.scene}' -- there are 'showcase' and 'cornell'")
+            exit(2)
+
+    val settings = Settings(o.width, o.height, o.spp, o.depth, o.roulette, sc.background, 1)
+    val cam = Camera.of(sc.view, settings)
+    val t0 = monotonic()
+
+    if o.rays
+        val hits = primary_hits(sc.world, cam)
+        val us = (monotonic() - t0).us
+        val rays = o.width * o.height
+        print(s"$rays primary rays, $hits hits, ${us / 1000} ms, ${real(rays) / real(us)} Mrays/s")
+        return
+
+    val pixels = render(sc.world, cam, o.threads)
+    val ms = (monotonic() - t0).us / 1000
+    val img = encode(pixels, o.width, o.height)
+
+    val bytes = if o.out.ends_with(".ppm") then ppm(img) else png_bytes(img).expect("cairo encodes the PNG")
+
+    write_bytes(o.out, bytes.view()).expect("writing the image")
+    print(s"${o.scene} ${o.width}x${o.height} at ${o.spp} spp on ${o.threads} threads: $ms ms -> ${o.out}")
+end main

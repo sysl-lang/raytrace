@@ -1,0 +1,589 @@
+@tests
+
+// What the ray tracer computes, checked against something it did not compute itself: the closed-form
+// answer of each intersection, Snell's law and Schlick's formula, a scene whose exact radiance is
+// known (the white furnace), a brute-force search the BVH must agree with bit for bit, and image
+// statistics numpy took from the committed reference render.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+import sysl.rand.{Rng, rng}
+import sysl.text.from_utf8
+
+val reference_png: []const u8 = embed("assets/reference.png")
+
+private near(a: real, b: real, tol: real) -> bool = (a - b).abs() <= tol
+
+private near3(a: Vec3, b: Vec3, tol: real) -> bool = near(a.x, b.x, tol) && near(a.y, b.y, tol) && near(a.z, b.z, tol)
+
+private const tight: real = 0.000000000001
+
+private gray() -> &sync Material = Lambertian(Solid(Vec3.splat(0.5)))
+
+private everything() -> Interval = Interval(0.001, real.infinity())
+
+// -- spheres -----------------------------------------------------------------------------------------
+
+@test("a ray down the axis meets the unit sphere at t = 4, facing it")
+sphere_head_on()
+    val s = Sphere.still(Vec3.zero(), 1.0, gray())
+    val h = s.hit(Ray(Vec3(0.0, 0.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+
+    assert_eq(h.t, 4.0)
+    assert(h.p == Vec3(0.0, 0.0, -1.0))
+    assert(h.normal == Vec3(0.0, 0.0, -1.0))
+    assert(h.front_face)
+
+@test("an off-axis ray meets it at 5 - sqrt(1 - 0.36), with the normal at the point")
+sphere_off_axis()
+    val s = Sphere.still(Vec3.zero(), 1.0, gray())
+    val h = s.hit(Ray(Vec3(0.6, 0.0, -5.0), Vec3(0.0, 0.0, 2.0), 0.0), everything()).unwrap()
+
+    // the direction has length 2, so t is half the distance
+    assert(near(h.t, 2.1, tight))
+    assert(near3(h.normal, Vec3(0.6, 0.0, -0.8), tight))
+
+@test("from inside, the hit is the far wall and the normal is turned back against the ray")
+sphere_from_inside()
+    val s = Sphere.still(Vec3.zero(), 2.0, gray())
+    val h = s.hit(Ray(Vec3.zero(), Vec3(1.0, 0.0, 0.0), 0.0), everything()).unwrap()
+
+    assert_eq(h.t, 2.0)
+    assert(!h.front_face)
+    assert(h.normal == Vec3(-1.0, 0.0, 0.0))
+
+@test("a ray past the rim misses, and so does a hit outside the interval")
+sphere_misses()
+    val s = Sphere.still(Vec3.zero(), 1.0, gray())
+
+    assert(s.hit(Ray(Vec3(1.0001, 0.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).is_none())
+    assert(s.hit(Ray(Vec3(0.0, 0.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), Interval(0.001, 3.9)).is_none())
+    assert(s.hit(Ray(Vec3(0.0, 0.0, -5.0), Vec3(0.0, 0.0, -1.0), 0.0), everything()).is_none())
+
+@test("a moving sphere is where its centre is at the ray's instant")
+sphere_moving()
+    val s = Sphere.moving(Vec3.zero(), Vec3(0.0, 2.0, 0.0), 0.5, gray())
+
+    assert(s.hit(Ray(Vec3(0.0, 1.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.5), everything()).is_some())
+    assert(s.hit(Ray(Vec3(0.0, 1.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).is_none())
+
+    val b = s.bbox()
+    assert(b.y.lo < -0.49 && b.y.hi > 2.49)
+
+@test("sphere (u, v): the poles, the equator, and the four meridians")
+sphere_uv_known_points()
+    assert(near(sphere_uv(Vec3(1.0, 0.0, 0.0)).0, 0.5, tight))
+    assert(near(sphere_uv(Vec3(1.0, 0.0, 0.0)).1, 0.5, tight))
+    assert(near(sphere_uv(Vec3(0.0, 0.0, 1.0)).0, 0.25, tight))
+    assert(near(sphere_uv(Vec3(0.0, 0.0, -1.0)).0, 0.75, tight))
+    assert(near(sphere_uv(Vec3(-1.0, 0.0, 0.0)).0, 1.0, tight) || near(sphere_uv(Vec3(-1.0, 0.0, 0.0)).0, 0.0, tight))
+    assert(near(sphere_uv(Vec3(0.0, 1.0, 0.0)).1, 1.0, tight))
+    assert(near(sphere_uv(Vec3(0.0, -1.0, 0.0)).1, 0.0, tight))
+
+// -- triangles and quads -----------------------------------------------------------------------------
+
+@test("a triangle is hit where the plane is, with the barycentric coordinates of the point")
+triangle_closed_form()
+    val t = Triangle.of(Vec3.zero(), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), gray())
+    val h = t.hit(Ray(Vec3(0.25, 0.125, -2.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+
+    assert_eq(h.t, 2.0)
+    assert_eq(h.u, 0.25)
+    assert_eq(h.v, 0.125)
+    assert(h.p == Vec3(0.25, 0.125, 0.0))
+    assert(h.normal == Vec3(0.0, 0.0, -1.0))
+
+@test("a slanted ray meets the triangle x + y + z = 1 at the closed-form t")
+triangle_slanted()
+    val t = Triangle.of(Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0), gray())
+    val o = Vec3(-1.0, -0.5, -2.0)
+    val d = Vec3(1.0, 0.75, 2.5)
+    val h = t.hit(Ray(o, d, 0.0), everything()).unwrap()
+
+    // (1 - (o.x + o.y + o.z)) / (d.x + d.y + d.z) = 4.5 / 4.25
+    assert(near(h.t, 4.5 / 4.25, tight))
+    assert(near(h.p.x + h.p.y + h.p.z, 1.0, tight))
+
+@test("outside an edge, parallel to the plane, or behind the origin: no hit")
+triangle_misses()
+    val t = Triangle.of(Vec3.zero(), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), gray())
+
+    assert(t.hit(Ray(Vec3(0.6, 0.6, -2.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).is_none())
+    assert(t.hit(Ray(Vec3(-0.01, 0.5, -2.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).is_none())
+    assert(t.hit(Ray(Vec3(0.2, 0.2, -2.0), Vec3(1.0, 0.0, 0.0), 0.0), everything()).is_none())
+    assert(t.hit(Ray(Vec3(0.2, 0.2, 2.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).is_none())
+
+@test("a quad is hit at the plane, with (u, v) its fractions along the two edges")
+quad_closed_form()
+    val q = Quad.of(Vec3.zero(), Vec3(2.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), gray())
+    val h = q.hit(Ray(Vec3(1.5, 0.5, 3.0), Vec3(0.0, 0.0, -1.0), 0.0), everything()).unwrap()
+
+    assert_eq(h.t, 3.0)
+    assert_eq(h.u, 0.75)
+    assert_eq(h.v, 0.5)
+    // u x v is +z and the ray comes down -z onto it: the front face
+    assert(h.front_face)
+    assert(h.normal == Vec3(0.0, 0.0, 1.0))
+    val back = q.hit(Ray(Vec3(1.5, 0.5, -3.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+    assert(!back.front_face)
+    assert(back.normal == Vec3(0.0, 0.0, -1.0))
+    assert(q.hit(Ray(Vec3(2.1, 0.5, 3.0), Vec3(0.0, 0.0, -1.0), 0.0), everything()).is_none())
+    assert(q.hit(Ray(Vec3(1.0, 0.5, 3.0), Vec3(1.0, 0.0, 0.0), 0.0), everything()).is_none())
+
+@test("a quad in a coordinate plane still has a box with thickness")
+quad_box_is_padded()
+    val b = Quad.of(Vec3.zero(), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), gray()).bbox()
+    assert(b.y.size() > 0.0)
+
+// -- boxes -------------------------------------------------------------------------------------------
+
+@test("the slab test: through, past, parallel inside and parallel outside the unit box")
+aabb_slab()
+    val b = Aabb.corners(Vec3.zero(), Vec3(1.0, 1.0, 1.0))
+
+    assert(b.hit(Ray(Vec3(-1.0, 0.5, 0.5), Vec3(1.0, 0.0, 0.0), 0.0), everything()))
+    assert(b.hit(Ray(Vec3(-1.0, -1.0, 0.5), Vec3(1.0, 1.0, 0.0), 0.0), everything()))
+    assert(!b.hit(Ray(Vec3(-1.0, 2.5, 0.5), Vec3(1.0, 0.0, 0.0), 0.0), everything()))
+    assert(!b.hit(Ray(Vec3(-1.0, 0.0, 0.5), Vec3(1.0, 3.0, 0.0), 0.0), everything()))
+    assert(!b.hit(Ray(Vec3(2.0, 0.5, 0.5), Vec3(1.0, 0.0, 0.0), 0.0), everything()))
+
+@test("the slab test honours the interval: a box beyond t_max is not hit")
+aabb_interval()
+    val b = Aabb.corners(Vec3.zero(), Vec3(1.0, 1.0, 1.0))
+    val r = Ray(Vec3(-1.0, 0.5, 0.5), Vec3(1.0, 0.0, 0.0), 0.0)
+
+    assert(!b.hit(r, Interval(0.0, 0.99)))
+    assert(b.hit(r, Interval(0.0, 1.01)))
+
+@test("corners in either order make one box")
+aabb_corners_order()
+    val a = Aabb.corners(Vec3(1.0, 2.0, 3.0), Vec3(-2.0, 0.0, 5.0))
+    assert_eq(a.x.lo, -2.0)
+    assert_eq(a.y.hi, 2.0)
+    assert_eq(a.z.lo, 3.0)
+    assert_eq(a.longest_axis(), 0)
+
+// -- the BVH -----------------------------------------------------------------------------------------
+
+private random_scene(g: *Rng) -> Buf[&sync Hittable]
+    val items: Buf[&sync Hittable] = buf()
+
+    for _ in 0..<150
+        val c = Vec3(uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0))
+        items.push(Sphere.still(c, uniform(g, 0.1, 1.5), gray()))
+
+    for _ in 0..<150
+        val a = Vec3(uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0))
+        val e = Vec3(uniform(g, -2.0, 2.0), uniform(g, -2.0, 2.0), uniform(g, -2.0, 2.0))
+        val f = Vec3(uniform(g, -2.0, 2.0), uniform(g, -2.0, 2.0), uniform(g, -2.0, 2.0))
+        items.push(Triangle.of(a, a + e, a + f, gray()))
+
+    for _ in 0..<20
+        val q = Vec3(uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0), uniform(g, -10.0, 10.0))
+        items.push(Quad.of(q, Vec3(uniform(g, 0.5, 3.0), 0.0, 0.0), Vec3(0.0, uniform(g, 0.5, 3.0), uniform(g, -1.0, 1.0)), gray()))
+
+    items
+end random_scene
+
+@test("the BVH finds exactly the hit a brute-force search finds, for 20000 random rays")
+bvh_matches_brute_force()
+    var g = rng(2026, 1)
+    val items = random_scene(&g)
+
+    // the list keeps its own order; the BVH reorders its buffer while building
+    val copy: Buf[&sync Hittable] = buf()
+    for i in 0..<items.len()
+        copy.push(items.at(i))
+
+    val list = HitList(items)
+    val tree = bvh(copy)
+    var hits = 0
+
+    for _ in 0..<20000
+        val o = Vec3(uniform(&g, -15.0, 15.0), uniform(&g, -15.0, 15.0), uniform(&g, -15.0, 15.0))
+        val r = Ray(o, random_unit_vector(&g), 0.0)
+        val a = list.hit(r, everything())
+        val b = tree.hit(r, everything())
+
+        assert_eq(a.is_some(), b.is_some())
+
+        if a.is_some()
+            hits += 1
+            val x = a.unwrap()
+            val y = b.unwrap()
+            assert_eq(x.t, y.t)
+            assert(x.p == y.p)
+            assert(x.normal == y.normal)
+
+    // enough of each kind of answer for the agreement to mean something
+    assert(hits > 3000 && hits < 17000)
+end bvh_matches_brute_force
+
+@test("an empty BVH hits nothing")
+bvh_empty()
+    val tree = bvh(buf())
+    assert(tree.hit(Ray(Vec3.zero(), Vec3(1.0, 0.0, 0.0), 0.0), everything()).is_none())
+
+// -- reflection and refraction -----------------------------------------------------------------------
+
+@test("reflect mirrors about the normal")
+reflect_mirrors()
+    assert(Vec3(1.0, -1.0, 0.0).reflect(Vec3(0.0, 1.0, 0.0)) == Vec3(1.0, 1.0, 0.0))
+
+@test("refraction at 45 degrees into glass obeys Snell's law: sin t = sin 45 / 1.5")
+snell_45_degrees()
+    val s = 0.5.sqrt()
+    val out = Vec3(s, -s, 0.0).refract(Vec3(0.0, 1.0, 0.0), 1.0 / 1.5)
+
+    // numpy: sin_t = sin(pi/4)/1.5, cos_t = sqrt(1 - sin_t**2)
+    assert(near(out.x, 0.4714045207910317, tight))
+    assert(near(out.y, -0.8819171036881969, tight))
+    assert(near(out.length(), 1.0, tight))
+
+@test("at normal incidence the ray goes straight through")
+snell_normal_incidence()
+    val out = Vec3(0.0, -1.0, 0.0).refract(Vec3(0.0, 1.0, 0.0), 1.0 / 1.33)
+    assert(near3(out, Vec3(0.0, -1.0, 0.0), tight))
+
+@test("Schlick: r0 head on, 1 at grazing, and the fifth power between")
+schlick_formula()
+    // glass from air: r0 = ((1 - 1/1.5) / (1 + 1/1.5))^2 = 0.04
+    assert(near(schlick(1.0, 1.0 / 1.5), 0.04, tight))
+    assert(near(schlick(0.0, 1.0 / 1.5), 1.0, tight))
+    assert(near(schlick(0.5, 1.0 / 1.5), 0.04 + 0.96 * 0.03125, tight))
+    // the ratio and its inverse give one r0
+    assert(near(schlick(1.0, 1.5), 0.04, tight))
+
+@test("past the critical angle a dielectric always reflects")
+total_internal_reflection()
+    val glass: &sync Material = Dielectric(1.5)
+    val s = 0.8.sqrt()
+    val d = Vec3(s, -(0.2.sqrt()), 0.0)                   // 63 degrees from the normal, inside the glass
+    val h = Hit(Vec3.zero(), Vec3(0.0, 1.0, 0.0), glass, 1.0, 0.0, 0.0, false)
+    var g = rng(1, 1)
+
+    for _ in 0..<100
+        val sc = glass.scatter(Ray(Vec3(0.0, 1.0, 0.0), d, 0.0), h, &g).unwrap()
+        assert(near3(sc.ray.dir, d.reflect(Vec3(0.0, 1.0, 0.0)), tight))
+
+@test("a metal ray scattered below the surface is absorbed")
+metal_absorbs_below()
+    val m: &sync Material = Metal(Vec3.splat(1.0), 0.0)
+    val h = Hit(Vec3.zero(), Vec3(0.0, 1.0, 0.0), m, 1.0, 0.0, 0.0, true)
+    var g = rng(1, 1)
+
+    assert(m.scatter(Ray(Vec3(-1.0, 1.0, 0.0), Vec3(1.0, -1.0, 0.0), 0.0), h, &g).is_some())
+    assert(m.scatter(Ray(Vec3(-1.0, -1.0, 0.0), Vec3(1.0, 1.0, 0.0), 0.0), h, &g).is_none())
+
+@test("a light scatters nothing and emits its colour; a diffuse surface emits black")
+emission()
+    val light: &sync Material = DiffuseLight(Solid(Vec3(4.0, 3.0, 2.0)))
+    val h = Hit(Vec3.zero(), Vec3(0.0, 1.0, 0.0), light, 1.0, 0.0, 0.0, true)
+    var g = rng(1, 1)
+
+    assert(light.scatter(Ray(Vec3(0.0, 1.0, 0.0), Vec3(0.0, -1.0, 0.0), 0.0), h, &g).is_none())
+    assert(light.emitted(0.0, 0.0, Vec3.zero()) == Vec3(4.0, 3.0, 2.0))
+    assert(gray().emitted(0.0, 0.0, Vec3.zero()) == Vec3.zero())
+
+// -- the white furnace -------------------------------------------------------------------------------
+
+// Lossless surfaces in a uniformly white sky: whatever path a ray takes, every bounce multiplies by
+// one and every path ends in the sky, so the exact answer is 1 at every pixel. The three materials
+// are packed into a cluster with narrow gaps over a floor, so that many paths bounce between them.
+// None of them overlap: a pocket closed on every side would trap a path for good, and that is a
+// fault of the scene rather than of the integrator.
+private furnace(roulette: bool, depth: int) -> Vec3
+    val items: Buf[&sync Hittable] = buf()
+    val white: &sync Material = Lambertian(Solid(Vec3.splat(1.0)))
+
+    items.push(Sphere.still(Vec3(-0.75, 0.0, 0.0), 0.7, white))
+    items.push(Sphere.still(Vec3(0.75, 0.0, 0.0), 0.7, Metal(Vec3.splat(1.0), 0.0)))
+    items.push(Sphere.still(Vec3(0.0, 1.0, 0.2), 0.5, white))
+    items.push(Sphere.still(Vec3(0.0, -0.55, 0.8), 0.4, Dielectric(1.5)))
+    items.push(Quad.of(Vec3(-2.0, -1.0, -1.0), Vec3(4.0, 0.0, 0.0), Vec3(0.0, 0.0, 3.0), white))
+
+    val s = Settings(24, 24, 32, depth, roulette, Vec3.splat(1.0), 7)
+    val cam = Camera.of(View(Vec3(0.0, 0.5, 4.0), Vec3.zero(), Vec3(0.0, 1.0, 0.0), 40.0, 0.0, 4.0), s)
+    val px = render(bvh(items), cam, 4)
+    var sum = Vec3.zero()
+
+    for p in px
+        sum = sum + p
+
+    sum / real(px.len)
+end furnace
+
+@test("white furnace: lossless surfaces in a white sky come out exactly white")
+white_furnace()
+    val m = furnace(false, 200)
+    assert(near3(m, Vec3.splat(1.0), 0.000001))
+
+@test("white furnace with Russian roulette: unbiased, so the mean converges to white")
+white_furnace_roulette()
+    val m = furnace(true, 200)
+    assert(near3(m, Vec3.splat(1.0), 0.02))
+
+@test("white furnace, paths cut at two bounces: energy is lost, as it must be")
+white_furnace_truncated()
+    val m = furnace(false, 2)
+    assert(m.x < 0.99 && m.x > 0.5)
+
+// -- textures ----------------------------------------------------------------------------------------
+
+@test("the checker alternates between cells, by the point and not by (u, v)")
+checker_cells()
+    val c = Checker.of(1.0, Vec3.splat(0.0), Vec3.splat(1.0))
+
+    assert(c.value(0.0, 0.0, Vec3(0.5, 0.5, 0.5)) == Vec3.splat(0.0))
+    assert(c.value(0.0, 0.0, Vec3(1.5, 0.5, 0.5)) == Vec3.splat(1.0))
+    assert(c.value(0.0, 0.0, Vec3(1.5, 1.5, 0.5)) == Vec3.splat(0.0))
+    assert(c.value(0.9, 0.9, Vec3(-0.5, 0.5, 0.5)) == Vec3.splat(1.0))
+
+@test("Perlin noise is zero on the lattice, bounded off it, and fixed by its seed")
+perlin_noise()
+    val p = Perlin.of(42)
+    val q = Perlin.of(42)
+    val r = Perlin.of(43)
+    var differs = false
+
+    for i in 0..<10
+        assert_eq(p.noise(Vec3(real(i), real(-i), real(2 * i))), 0.0)
+
+    var g = rng(5, 5)
+    for _ in 0..<1000
+        val x = Vec3(uniform(&g, -50.0, 50.0), uniform(&g, -50.0, 50.0), uniform(&g, -50.0, 50.0))
+        val n = p.noise(x)
+        assert(n.abs() <= 1.0)
+        assert_eq(n, q.noise(x))
+        if n != r.noise(x) then differs = true
+
+    assert(differs)
+
+@test("the image texture reads the planet's texels, from sRGB to linear")
+image_texture_texels()
+    val t = planet()
+
+    assert_eq(t.width, 128)
+    assert_eq(t.height, 64)
+    // the polar cap at the top, (235, 240, 245) in the file
+    assert(near3(t.value(0.1, 0.995, Vec3.zero()), Vec3(to_linear(235), to_linear(240), to_linear(245)), tight))
+    // ocean at u = 0.1, v = 0.5 + one row: longitude -144, latitude -1.4 -> (20, 60, 170)
+    assert(near3(t.value(0.1, 0.49, Vec3.zero()), Vec3(to_linear(20), to_linear(60), to_linear(170)), tight))
+
+@test("an image texture with no pixels answers cyan, Shirley's debugging colour")
+image_texture_empty()
+    val t = ImageTexture(0, 0, [])
+    assert(t.value(0.5, 0.5, Vec3.zero()) == Vec3(0.0, 1.0, 1.0))
+
+// -- instances and meshes ----------------------------------------------------------------------------
+
+@test("a translated sphere is hit where it was moved to")
+translate_moves()
+    val t = Translate.of(Sphere.still(Vec3.zero(), 1.0, gray()), Vec3(10.0, 0.0, 0.0))
+    val h = t.hit(Ray(Vec3(10.0, 0.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+
+    assert_eq(h.t, 4.0)
+    assert(h.p == Vec3(10.0, 0.0, -1.0))
+    assert_eq(t.bbox().x.lo, 9.0)
+
+@test("a box turned 90 degrees about y swaps its x and z extents")
+rotate_y_quarter()
+    val r = RotateY.of(cuboid(Vec3.zero(), Vec3(1.0, 2.0, 3.0), gray()), 90.0)
+    val b = r.bbox()
+
+    assert(near(b.x.size(), 3.0, 0.001))
+    assert(near(b.z.size(), 1.0, 0.001))
+
+    // a ray along -z at x = 1.5 enters the turned box's face at z = 0
+    val h = r.hit(Ray(Vec3(1.5, 1.0, 5.0), Vec3(0.0, 0.0, -1.0), 0.0), everything()).unwrap()
+    assert(near(h.p.z, 0.0, 0.000001))
+    assert(near3(h.normal, Vec3(0.0, 0.0, 1.0), 0.000001))
+
+@test("the icosphere mesh: 80 triangles, every one on the unit sphere")
+obj_icosphere()
+    val tris = read_obj(from_utf8(icosphere_obj).unwrap(), 1.0, Vec3.zero(), gray()).unwrap()
+    assert_eq(tris.len(), 80)
+
+    val mesh = bvh(tris)
+    val h = mesh.hit(Ray(Vec3(0.0, 0.0, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+    // an edge's midpoint sits on the -z axis, so the ray meets the mesh exactly where the sphere is
+    assert_eq(h.t, 4.0)
+    assert(h.normal.z < 0.0)
+
+@test("an OBJ quad is fanned into two triangles, and negative indices count back")
+obj_fan_and_negative()
+    val src = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf -4 -3/1 -2//7 -1/2/3\n"
+    val tris = read_obj(src, 2.0, Vec3(0.0, 0.0, 1.0), gray()).unwrap()
+
+    assert_eq(tris.len(), 2)
+    val h = bvh(tris).hit(Ray(Vec3(1.0, 1.5, -5.0), Vec3(0.0, 0.0, 1.0), 0.0), everything()).unwrap()
+    assert_eq(h.t, 6.0)
+
+@test("an OBJ with a bad number, a missing vertex or a two-corner face is refused at its line")
+obj_errors()
+    read_obj("v 0 0 zero\n", 1.0, Vec3.zero(), gray()) match
+        Err(BadNumber(l)) -> assert_eq(l, 1)
+        else assert(false, "a bad number")
+    read_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\n\nf 1 2 4\n", 1.0, Vec3.zero(), gray()) match
+        Err(BadIndex(l)) -> assert_eq(l, 5)
+        else assert(false, "a missing vertex")
+    read_obj("v 0 0 0\nf 1 1\n", 1.0, Vec3.zero(), gray()) match
+        Err(ShortFace(l)) -> assert_eq(l, 2)
+        else assert(false, "a short face")
+    read_obj("v 0 0 0\nf 0 1 1\n", 1.0, Vec3.zero(), gray()) match
+        Err(BadIndex(l)) -> assert_eq(l, 2)
+        else assert(false, "index 0 is no vertex")
+
+// -- the camera --------------------------------------------------------------------------------------
+
+@test("a pinhole camera's middle ray points at what it looks at")
+camera_center_ray()
+    val s = Settings(101, 51, 1, 1, false, Vec3.zero(), 1)
+    val cam = Camera.of(View(Vec3(1.0, 2.0, 3.0), Vec3(-1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), 60.0, 0.0, 1.0), s)
+    val p = cam.pixel00 + cam.du * 50.0 + cam.dv * 25.0
+    val dir = (p - cam.center).unit()
+
+    assert(near3(dir, (Vec3(-1.0, 0.0, 0.0) - Vec3(1.0, 2.0, 3.0)).unit(), 0.0000000001))
+
+    // the vertical field of view spans the rows: top edge to bottom edge is 60 degrees
+    val top = (cam.pixel00 + cam.du * 50.0 - cam.dv * 0.5 - cam.center).unit()
+    val bottom = (cam.pixel00 + cam.du * 50.0 + cam.dv * 50.5 - cam.center).unit()
+    assert(near(top.dot(bottom).acos().to_degrees(), 60.0, 0.0000001))
+
+@test("with a lens, rays leave from points of the aperture disk, inside its radius")
+camera_defocus()
+    val s = Settings(10, 10, 1, 1, false, Vec3.zero(), 1)
+    val cam = Camera.of(View(Vec3.zero(), Vec3(0.0, 0.0, -1.0), Vec3(0.0, 1.0, 0.0), 40.0, 10.0, 5.0), s)
+    val radius = 5.0 * 5.0.to_radians().tan()
+    var g = rng(3, 3)
+    var spread = 0.0
+
+    for _ in 0..<200
+        val r = cam.get_ray(5, 5, &g)
+        assert(near(r.origin.z, 0.0, tight))
+        assert(r.origin.length() <= radius + tight)
+        if r.origin.length() > spread then spread = r.origin.length()
+
+    assert(spread > radius * 0.8)
+
+// -- determinism and threads -------------------------------------------------------------------------
+
+private small_showcase(threads: int) -> []Vec3
+    val sc = showcase()
+    val cam = Camera.of(sc.view, Settings(64, 36, 4, 10, false, sc.background, 1))
+    render(sc.world, cam, threads)
+
+@test("the same image, bit for bit, at 1, 3 and 8 threads")
+threads_do_not_change_the_image()
+    val one = small_showcase(1)
+    val three = small_showcase(3)
+    val eight = small_showcase(8)
+
+    for i in 0..<one.len
+        assert(one[i] == three[i])
+        assert(one[i] == eight[i])
+
+@test("a different seed is a different image")
+seed_changes_the_image()
+    val sc = showcase()
+    val a = render(sc.world, Camera.of(sc.view, Settings(16, 16, 2, 5, false, sc.background, 1)), 2)
+    val b = render(sc.world, Camera.of(sc.view, Settings(16, 16, 2, 5, false, sc.background, 2)), 2)
+    var same: usize = 0
+
+    for i in 0..<a.len
+        if a[i] == b[i] then same += 1
+
+    // the pixels that see only the sky are the same whatever the seed; every other one differs
+    assert(same < a.len * 3 / 4)
+
+// -- the final image ---------------------------------------------------------------------------------
+
+// `assets/reference.png` is `raytrace showcase -w 160 -h 90 -s 16` as committed. numpy read it and
+// measured each channel's mean and standard deviation on the 0..255 scale, decoding the file with
+// zlib and its own filter code; the render below is the same scene at the same settings. The C port
+// in `bench/rt.c` renders that scene byte for byte the same.
+@test("the showcase matches the reference render: per-channel statistics and PSNR")
+final_scene_statistics()
+    val sc = showcase()
+    val cam = Camera.of(sc.view, Settings(160, 90, 16, 20, false, sc.background, 1))
+    val img = encode(render(sc.world, cam, 8), 160, 90)
+    val st = stats(img)
+
+    assert(near3(st.mean, Vec3(150.33659722222222, 162.960625, 167.16305555555556), 0.5))
+    assert(near3(st.sd, Vec3(45.418496532910375, 43.36569038291853, 58.86159327512128), 0.5))
+
+    var bytes: []u8 = [0; reference_png.len]
+    for i in 0..<reference_png.len
+        bytes[i] = reference_png[i]
+
+    val reference = read_png(bytes).unwrap()
+    assert_eq(reference.width, 160)
+    assert(psnr(img, reference) > 40.0)
+end final_scene_statistics
+
+@test("PSNR: infinite for identical images, and 20 log10(255 / d) for a uniform error d")
+psnr_formula()
+    var a: []u8 = [100; 300]
+    var b: []u8 = [100; 300]
+    assert(psnr(Rgb8(10, 10, a), Rgb8(10, 10, b)) == real.infinity())
+
+    for i in 0..<300
+        b[i] = 105
+
+    assert(near(psnr(Rgb8(10, 10, a), Rgb8(10, 10, b)), 20.0 * (255.0 / 5.0).log10(), 0.000000001))
+
+// -- the file formats --------------------------------------------------------------------------------
+
+private gradient() -> Rgb8
+    var px: []u8 = [0; 7 * 5 * 3]
+    for i in 0..<px.len
+        px[i] = u8(i * 37 % 256)
+    Rgb8(7, 5, px)
+
+@test("a PPM round-trips byte for byte")
+ppm_round_trip()
+    val img = gradient()
+    val back = read_ppm(ppm(img).view()).unwrap()
+
+    assert_eq(back.width, 7)
+    assert_eq(back.height, 5)
+    for i in 0..<img.bytes.len
+        assert_eq(back.bytes[i], img.bytes[i])
+
+@test("a PPM header may carry comments; a P3 or a 16-bit PPM is refused")
+ppm_header()
+    val text = "P6\n# made by hand\n2 1\n255\nabcdef"
+    val img = read_ppm(text.bytes).unwrap()
+    assert_eq(img.width, 2)
+    assert_eq(img.bytes[5], u8('f'))
+
+    assert(read_ppm("P3\n1 1\n255\n0 0 0\n".bytes).is_none())
+    assert(read_ppm("P6\n1 1\n65535\nabcdef".bytes).is_none())
+    assert(read_ppm("P6\n2 2\n255\nabc".bytes).is_none())
+
+@test("a PNG written by cairo and read by sh.sysl.png round-trips byte for byte")
+png_round_trip()
+    val img = gradient()
+    val png = png_bytes(img).unwrap()
+    val back = read_png(png.view()).unwrap()
+
+    assert_eq(back.width, 7)
+    assert_eq(back.height, 5)
+    for i in 0..<img.bytes.len
+        assert_eq(back.bytes[i], img.bytes[i])
+
+@test("encoding: gamma 2, clamped, and NaN is black")
+encode_gamma()
+    val px: []Vec3 = [Vec3(0.25, 1.5, -1.0), Vec3(real.nan(), 0.0, 1.0)]
+    val img = encode(px, 2, 1)
+
+    assert_eq(img.bytes[0], 128)
+    assert_eq(img.bytes[1], 255)
+    assert_eq(img.bytes[2], 0)
+    assert_eq(img.bytes[3], 0)
+    assert_eq(img.bytes[5], 255)
+
+@test("only the two scenes have names")
+scene_names()
+    assert(scene_named("cornell").is_some())
+    assert(scene_named("nonesuch").is_none())

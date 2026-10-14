@@ -1,0 +1,165 @@
+// Getting an image out: linear light to eight-bit sRGB, the two file formats, and the statistics the
+// tests compare renders by.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+import sysl.text.parse_int
+import sh.sysl.cairo.{Format, image_surface}
+import sh.sysl.png
+
+/** An eight-bit RGB image, row-major from the top. */
+struct Rgb8
+    width: int
+    height: int
+    bytes: []u8
+
+/** Linear light to eight bits: the gamma-2 curve Shirley uses (a square root), clamped to [0, 1). A
+ * NaN -- which a pixel only gets from a bug -- comes out black rather than as whatever its bits are.
+ */
+encode(pixels: []Vec3, width: int, height: int) -> Rgb8
+    var out: []u8 = [0; width * height * 3]
+
+    for i in 0..<width * height
+        val c = pixels[i]
+        out[i * 3] = to_byte(c.x)
+        out[i * 3 + 1] = to_byte(c.y)
+        out[i * 3 + 2] = to_byte(c.z)
+
+    Rgb8(width, height, out)
+end encode
+
+to_byte(linear: real) -> u8
+    if !(linear > 0.0) then return 0
+    u8(256.0 * Interval(0.0, 0.999).clamp(linear.sqrt()))
+
+// -- PPM ---------------------------------------------------------------------------------------------
+
+/** The binary PPM (`P6`) of an image: a text header, then the samples. */
+ppm(img: Rgb8) -> Buf[u8]
+    val out = buf[u8]()
+    out.extend(s"P6\n${img.width} ${img.height}\n255\n".bytes)
+    out.extend(img.bytes)
+    out
+
+/** A binary PPM read back, for a `maxval` of 255. Comments in the header are allowed, as the format
+ * allows them.
+ */
+read_ppm(b: []const u8) -> Option[Rgb8]
+    var at: usize = 0
+    var fields: [4]int = [0; 4]
+
+    if b.len < 2 || b[0] != u8('P') || b[1] != u8('6') then return None
+    at = 2
+
+    for f in 1..<4
+        // whitespace and comments
+        loop
+            if at >= b.len then return None
+            if b[at] == u8('#')
+                while at < b.len && b[at] != u8('\n')
+                    at += 1
+            else if b[at] == u8(' ') || b[at] == u8('\n') || b[at] == u8('\t') || b[at] == u8('\r')
+                at += 1
+            else
+                break
+
+        val start = at
+        while at < b.len && b[at] >= u8('0') && b[at] <= u8('9')
+            at += 1
+
+        fields[f] = parse_int(b[start..<at]).ok()?
+
+    at += 1
+
+    val w = fields[1]
+    val h = fields[2]
+    val n = usize(w * h * 3)
+
+    if fields[3] != 255 || b.len - at < n then return None
+
+    var px: []u8 = [0; n]
+    for i in 0..<n
+        px[i] = b[at + i]
+
+    Some(Rgb8(w, h, px))
+end read_ppm
+
+// -- PNG ---------------------------------------------------------------------------------------------
+
+/** The PNG of an image, encoded by cairo from an opaque ARGB32 surface. */
+png_bytes(img: Rgb8) -> Option[Buf[u8]]
+    val s = image_surface(Format.Argb32, img.width, img.height)
+
+    s.flush()
+
+    val data = s.data()
+    val stride = s.stride()
+
+    for y in 0..<img.height
+        for x in 0..<img.width
+            val o = y * stride + x * 4
+            val i = (y * img.width + x) * 3
+            data[o] = img.bytes[i + 2]
+            data[o + 1] = img.bytes[i + 1]
+            data[o + 2] = img.bytes[i]
+            data[o + 3] = 255
+
+    s.mark_dirty()
+    s.png_bytes().ok()
+end png_bytes
+
+/** A PNG read back by `sh.sysl.png`, whatever colour type it was written in. */
+read_png(b: []u8) -> Option[Rgb8]
+    val im = png.decode(b).ok()?
+    val w = int(im.width)
+    val h = int(im.height)
+    var px: []u8 = [0; w * h * 3]
+
+    for y in 0..<h
+        for x in 0..<w
+            val c = im.at(usize(x), usize(y))
+            val i = (y * w + x) * 3
+            px[i] = c.r
+            px[i + 1] = c.g
+            px[i + 2] = c.b
+
+    Some(Rgb8(w, h, px))
+end read_png
+
+// -- statistics --------------------------------------------------------------------------------------
+
+/** The mean and the standard deviation of each channel, on the 0..255 scale. */
+struct Stats
+    mean: Vec3
+    sd: Vec3
+
+stats(img: Rgb8) -> Stats
+    var sum = Vec3.zero()
+    var sq = Vec3.zero()
+    val n = real(img.width * img.height)
+
+    for i in 0..<img.width * img.height
+        val c = Vec3(real(img.bytes[i * 3]), real(img.bytes[i * 3 + 1]), real(img.bytes[i * 3 + 2]))
+        sum = sum + c
+        sq = sq + c * c
+
+    val mean = sum / n
+    val var_ = sq / n - mean * mean
+
+    Stats(mean, Vec3(var_.x.abs().sqrt(), var_.y.abs().sqrt(), var_.z.abs().sqrt()))
+end stats
+
+/** Peak signal-to-noise ratio in decibels between two images of one size; infinite when they are
+ * identical.
+ */
+psnr(a: Rgb8, b: Rgb8) -> real
+    var se = 0.0
+    for i in 0..<a.bytes.len
+        val d = real(a.bytes[i]) - real(b.bytes[i])
+        se += d * d
+
+    if se == 0.0 then return real.infinity()
+
+    val mse = se / real(a.bytes.len)
+    10.0 * (255.0 * 255.0 / mse).log10()
+end psnr

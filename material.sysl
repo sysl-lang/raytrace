@@ -1,0 +1,99 @@
+// Materials: what happens to light where a ray meets a surface. Each is a trait object, so a scene
+// mixes them freely and the integrator never asks which one it has.
+
+import sysl.math.{Float, min}
+import sysl.rand.Rng
+
+/** What a scattering surface hands back: the colour it filters by, and the ray that continues. */
+struct Scatter
+    attenuation: Vec3
+    ray: Ray
+
+trait Material
+    /** The continuing ray, or `None` where the light is absorbed. */
+    scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter]
+
+    /** The light the surface gives off at a point; black for everything but a light. */
+    emitted(self, u: real, v: real, p: Vec3) -> Vec3 = Vec3.zero()
+
+// -- sampling ----------------------------------------------------------------------------------------
+
+/** A uniformly distributed point in `[lo, hi)`. */
+uniform(rng: *Rng, lo: real, hi: real) -> real = lo + (hi - lo) * rng.unit()
+
+/** A uniformly distributed direction, by rejection from the cube. The lower bound keeps a point so
+ * near the centre that its length underflows from being normalized into infinities.
+ */
+random_unit_vector(rng: *Rng) -> Vec3
+    loop
+        val p = Vec3(uniform(rng, -1.0, 1.0), uniform(rng, -1.0, 1.0), uniform(rng, -1.0, 1.0))
+        val lensq = p.length_squared()
+        if lensq > 1e-160 && lensq <= 1.0 then return p / lensq.sqrt()
+
+/** A uniformly distributed point of the unit disk in the z = 0 plane, which is what a lens samples. */
+random_in_unit_disk(rng: *Rng) -> Vec3
+    loop
+        val p = Vec3(uniform(rng, -1.0, 1.0), uniform(rng, -1.0, 1.0), 0.0)
+        if p.length_squared() < 1.0 then return p
+
+/** Schlick's approximation to the Fresnel reflectance of a dielectric at incidence cosine `cosine`,
+ * for a ratio of refractive indices `ri`.
+ */
+schlick(cosine: real, ri: real) -> real
+    val r = (1.0 - ri) / (1.0 + ri)
+    val r0 = r * r
+    r0 + (1.0 - r0) * (1.0 - cosine).pow(5.0)
+
+// -- the materials -----------------------------------------------------------------------------------
+
+/** An ideal diffuse surface: scatters about the normal with a cosine distribution. */
+struct Lambertian
+    tex: &sync Texture
+
+impl Material for Lambertian
+    scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter]
+        var dir = h.normal + random_unit_vector(rng)
+        if dir.near_zero() then dir = h.normal
+        Some(Scatter(self.tex.value(h.u, h.v, h.p), Ray(h.p, dir, r_in.time)))
+
+/** A mirror, roughened by `fuzz`: 0 is polished, 1 is as rough as it gets. */
+struct Metal
+    albedo: Vec3
+    fuzz: real
+
+impl Material for Metal
+    scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter]
+        val reflected = r_in.dir.reflect(h.normal).unit() + random_unit_vector(rng) * self.fuzz
+        if reflected.dot(h.normal) <= 0.0 then return None
+        Some(Scatter(self.albedo, Ray(h.p, reflected, r_in.time)))
+
+/** Glass, water, diamond: refracts where Snell's law allows and Schlick's reflectance does not
+ * choose a reflection, and reflects otherwise.
+ */
+struct Dielectric
+    ior: real
+
+impl Material for Dielectric
+    scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter]
+        val ri = if h.front_face then 1.0 / self.ior else self.ior
+        val unit_dir = r_in.dir.unit()
+        val cos_theta = min(-unit_dir.dot(h.normal), 1.0)
+        val sin_theta = (1.0 - cos_theta * cos_theta).sqrt()
+        val total = ri * sin_theta > 1.0
+
+        val dir = if total || schlick(cos_theta, ri) > rng.unit()
+            unit_dir.reflect(h.normal)
+        else
+            unit_dir.refract(h.normal, ri)
+
+        Some(Scatter(Vec3.splat(1.0), Ray(h.p, dir, r_in.time)))
+    end scatter
+
+/** A light: scatters nothing and emits its texture. */
+struct DiffuseLight
+    tex: &sync Texture
+
+impl Material for DiffuseLight
+    scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter] = None
+
+    override emitted(self, u: real, v: real, p: Vec3) -> Vec3 = self.tex.value(u, v, p)

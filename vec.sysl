@@ -1,0 +1,130 @@
+// Three-component vectors, by value: points, directions and colours are all one `Vec3`, as they are in
+// Shirley's books.
+//
+// **Why not `sh.sysl.linalg.Vector`**: linalg's vector is sized at run time and keeps its cells in a
+// counted `&Buf`, which is right for elimination over an `n` the caller chooses and wrong for the
+// inner loop of a ray tracer, where every intermediate would be an allocation. A ray tracer wants three
+// floats in registers, and a struct of three `real`s is exactly that.
+
+import sysl.math.{Float, min, max}
+
+struct Vec3
+    x: real
+    y: real
+    z: real
+
+    zero() -> Vec3 = Vec3(0.0, 0.0, 0.0)
+
+    splat(k: real) -> Vec3 = Vec3(k, k, k)
+
+    dot(self, o: Vec3) -> real = self.x * o.x + self.y * o.y + self.z * o.z
+
+    cross(self, o: Vec3) -> Vec3 =
+        Vec3(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
+
+    length_squared(self) -> real = self.dot(self)
+
+    length(self) -> real = self.length_squared().sqrt()
+
+    unit(self) -> Vec3 = self / self.length()
+
+    /** Whether every component is within 1e-8 of zero: a scatter direction that small would make a
+     * degenerate ray. */
+    near_zero(self) -> bool
+        val s = 0.00000001
+        self.x.abs() < s && self.y.abs() < s && self.z.abs() < s
+
+    /** The component on axis 0, 1 or 2. */
+    axis(self, a: int) -> real = if a == 0 then self.x else if a == 1 then self.y else self.z
+
+    min(self, o: Vec3) -> Vec3 = Vec3(min(self.x, o.x), min(self.y, o.y), min(self.z, o.z))
+
+    max(self, o: Vec3) -> Vec3 = Vec3(max(self.x, o.x), max(self.y, o.y), max(self.z, o.z))
+
+    /** `self` mirrored about the surface with normal `n`. */
+    reflect(self, n: Vec3) -> Vec3 = self - n * (2.0 * self.dot(n))
+
+    /** A unit vector `self` bent through a surface with unit normal `n`, by Snell's law, where
+     * `eta` is the ratio of the refractive indices (incident over transmitted). The caller has checked
+     * that it is not totally internally reflected.
+     */
+    refract(self, n: Vec3, eta: real) -> Vec3
+        val cos_theta = min(-self.dot(n), 1.0)
+        val perp = (self + n * cos_theta) * eta
+        val para = n * -(1.0 - perp.length_squared()).abs().sqrt()
+
+        perp + para
+    end refract
+
+impl Add for Vec3
+    add(self, o: Vec3) -> Vec3 = Vec3(self.x + o.x, self.y + o.y, self.z + o.z)
+
+impl Sub for Vec3
+    sub(self, o: Vec3) -> Vec3 = Vec3(self.x - o.x, self.y - o.y, self.z - o.z)
+
+impl Neg for Vec3
+    neg(self) -> Vec3 = Vec3(-self.x, -self.y, -self.z)
+
+/** Componentwise, which is what attenuating a colour by an albedo is. */
+impl Mul for Vec3
+    mul(self, o: Vec3) -> Vec3 = Vec3(self.x * o.x, self.y * o.y, self.z * o.z)
+
+impl Mul[real] for Vec3
+    mul(self, k: real) -> Vec3 = Vec3(self.x * k, self.y * k, self.z * k)
+
+impl Mul[Vec3, Vec3] for real
+    mul(self, v: Vec3) -> Vec3 = v * self
+
+impl Div[real] for Vec3
+    div(self, k: real) -> Vec3 = self * (1.0 / k)
+
+impl Eq for Vec3
+    eq(self, o: Vec3) -> bool = self.x == o.x && self.y == o.y && self.z == o.z
+
+impl Display for Vec3
+    display(self, out: *Writer, fmt: FormatSpec)
+        out.write("(".bytes)
+        self.x.display(out, fmt)
+        out.write(", ".bytes)
+        self.y.display(out, fmt)
+        out.write(", ".bytes)
+        self.z.display(out, fmt)
+        out.write(")".bytes)
+
+/** A half-line `origin + t * dir`, with the instant it was cast at -- what motion blur samples. */
+struct Ray
+    origin: Vec3
+    dir: Vec3
+    time: real
+
+    at(self, t: real) -> Vec3 = self.origin + self.dir * t
+
+/** A closed interval of the reals; the empty one has `lo > hi`. */
+struct Interval
+    lo: real
+    hi: real
+
+    empty() -> Interval = Interval(real.infinity(), -real.infinity())
+
+    universe() -> Interval = Interval(-real.infinity(), real.infinity())
+
+    hull(a: Interval, b: Interval) -> Interval = Interval(min(a.lo, b.lo), max(a.hi, b.hi))
+
+    size(self) -> real = self.hi - self.lo
+
+    contains(self, x: real) -> bool = self.lo <= x && x <= self.hi
+
+    surrounds(self, x: real) -> bool = self.lo < x && x < self.hi
+
+    clamp(self, x: real) -> real = if x < self.lo then self.lo else if x > self.hi then self.hi else x
+
+    /** Widened by `delta` in total, half on each side. */
+    expand(self, delta: real) -> Interval = Interval(self.lo - delta / 2.0, self.hi + delta / 2.0)
+
+    /** The same interval with its ends in order. */
+    ordered(self) -> Interval = if self.lo <= self.hi then self else Interval(self.hi, self.lo)
+
+    /** Widened to `delta` if it is thinner. */
+    at_least(self, delta: real) -> Interval = if self.size() < delta then self.expand(delta) else self
+
+    shifted(self, by: real) -> Interval = Interval(self.lo + by, self.hi + by)
