@@ -83,24 +83,27 @@ Measured on an M-series Mac, single-threaded, with the sysl program built at `op
 
 | | C -O2 | sysl | ratio |
 |---|---|---|---|
-| showcase 400×225, 32 spp | 629 ms | 1476 ms | 2.3× |
-| primary rays, 1600×900 | 23.5 Mrays/s | 7.7 Mrays/s | 3.0× |
+| showcase 400×225, 32 spp | 780 ms | 1466 ms | 1.9× |
+| primary rays, 1600×900 | 80 ms | 170 ms | 2.1× |
 
-Thread scaling, 400×225 at 32 spp:
+Each figure is the median of seven runs, interleaved with the C port's. Thread scaling, 400×225 at 32
+spp (median of three):
 
 | threads | 1 | 2 | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| ms | 1475 | 1335 | 1128 | 1100 | 1041 |
+| ms | 1421 | 1032 | 752 | 519 | 430 |
 
-**The speed gap is the compiler's.** Both causes have been reported for sysl `0.1.0-alpha.13`:
+**The rest of the gap is the compiler's.** `Ray` and `Aabb` already travel between sysl functions in
+registers, as LLVM aggregates, and `Aabb.hit` is inlined into `BvhNode.hit` as the C port's box test
+is. What remains is:
 
-1. **Thread scaling.** `Hit` carries its material as a `&sync Material`. Each copy of the
-   `Option[Hit]` that the BVH passes up retains and releases that material with an atomic add, which
-   is 13 `ldadd`s in `BvhNode.hit`. Every thread then fights over the same few counts. A reduced
-   program runs 4× slower on two threads than on one.
-2. **Single-threaded speed.** `Ray`, `Aabb` and `Option[Hit]` are passed and returned through
-   memory, and `Aabb.hit` is not inlined into `BvhNode.hit`. The C port passes pointers and has its
-   box test inlined.
+1. **`Option[Hit]` is returned through a hidden pointer.** It is too large to come back in
+   registers, so every level of the BVH writes its answer to memory and its caller reads it back.
+   The C port fills in one `hit_record` through a pointer that it passes all the way down.
+2. **Retain and release pairs survive inlining.** `Hit` carries its material as a `&sync Material`,
+   and each copy of the `Option[Hit]` that the BVH passes up still retains and releases that material
+   with an atomic add. Three `ldadd`s are left in `BvhNode.hit`, and they are where the threads
+   contend.
 
 ## What it cannot do yet, and why
 
