@@ -372,7 +372,7 @@ image_texture_texels()
 
 @test("an image texture with no pixels answers cyan, Shirley's debugging colour")
 image_texture_empty()
-    val t = ImageTexture(0, 0, [])
+    val t = ImageTexture(0, 0, buf[u8]().freeze())
     assert(t.value(0.5, 0.5, Vec3.zero()) == Vec3(0.0, 1.0, 1.0))
 
 // -- instances and meshes ----------------------------------------------------------------------------
@@ -498,9 +498,9 @@ seed_changes_the_image()
 
 // -- the final image ---------------------------------------------------------------------------------
 
-// `assets/reference.png` is `raytrace showcase -w 160 -h 90 -s 16` as committed. numpy read it and
-// measured each channel's mean and standard deviation on the 0..255 scale, decoding the file with
-// zlib and its own filter code; the render below is the same scene at the same settings. The C port
+// `assets/reference.png` is `raytrace showcase -w 160 -h 90 -s 16` as committed. ImageMagick read it
+// and measured each channel's mean and standard deviation on the 0..255 scale, decoding the file
+// with its own PNG code; the render below is the same scene at the same settings. The C port
 // in `bench/rt.c` renders that scene byte for byte the same.
 @test("the showcase matches the reference render: per-channel statistics and PSNR")
 final_scene_statistics()
@@ -509,8 +509,8 @@ final_scene_statistics()
     val img = encode(render(sc.world, cam, 8), 160, 90)
     val st = stats(img)
 
-    assert(near3(st.mean, Vec3(150.33659722222222, 162.960625, 167.16305555555556), 0.5))
-    assert(near3(st.sd, Vec3(45.418496532910375, 43.36569038291853, 58.86159327512128), 0.5))
+    assert(near3(st.mean, Vec3(146.55, 160.096, 165.642), 0.5))
+    assert(near3(st.sd, Vec3(50.2763, 46.7219, 60.6902), 0.5))
 
     var bytes: []u8 = [0; reference_png.len]
     for i in 0..<reference_png.len

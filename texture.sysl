@@ -1,6 +1,7 @@
 // Textures: a colour as a function of where a surface was hit, by its (u, v) coordinates or by the
 // point in space.
 
+import sysl.buf.Frozen
 import sysl.math.Float
 import sysl.rand.{Rng, rng}
 
@@ -37,7 +38,7 @@ impl Texture for Checker
 struct ImageTexture
     width: int
     height: int
-    rgb: []u8
+    rgb: &sync Frozen[u8]
 
 impl Texture for ImageTexture
     value(self, u: real, v: real, p: Vec3) -> Vec3
@@ -47,7 +48,7 @@ impl Texture for ImageTexture
         val vv = 1.0 - Interval(0.0, 1.0).clamp(v)
         val i = min_int(int(uu * real(self.width)), self.width - 1)
         val j = min_int(int(vv * real(self.height)), self.height - 1)
-        val at = (j * self.width + i) * 3
+        val at = usize((j * self.width + i) * 3)
 
         Vec3(to_linear(self.rgb[at]), to_linear(self.rgb[at + 1]), to_linear(self.rgb[at + 2]))
     end value

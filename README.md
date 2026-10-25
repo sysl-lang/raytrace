@@ -107,11 +107,6 @@ is. What remains is:
 
 ## What it cannot do yet, and why
 
-- **An image texture cannot be put in a scene**, so the showcase has a checkered ball where the
-  planet would be. The scene is shared between the render threads, so it is built from `&sync`
-  objects. A `&sync` object may not hold a slice or a `Buf`, because neither has an atomic count. That
-  leaves no way to say "pixels decoded once and then read by every thread", short of a lock on every
-  texel or a raw pointer. `ImageTexture` itself works and is tested; only sharing it is blocked.
 - **There is no list of hittables in a scene**, for the same reason. The BVH is a tree of `&sync`
   nodes, so it does not need one. `HitList` exists for the brute-force test, which runs on one thread.
 
