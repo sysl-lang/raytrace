@@ -72,7 +72,8 @@ It needs cairo (`brew install cairo`) for the PNG encoder.
 
 `bench/rt.c` ports the showcase to C, step for step: the same PCG32 streams, the same order of random
 draws, the same BVH, and the materials behind function-pointer tables. **Its image is byte-identical to
-the sysl one** (400×225 at 32 spp, MSE 0). That makes the C port a second, independent check on the
+the sysl one** (400×225 at 32 spp, `cmp` finds no difference; the planet's image is generated in C
+by the formulas of `assets/make_assets.py`). That makes the C port a second, independent check on the
 whole renderer.
 
 ```
@@ -83,15 +84,16 @@ Measured on an M-series Mac, single-threaded, with the sysl program built at `op
 
 | | C -O2 | sysl | ratio |
 |---|---|---|---|
-| showcase 400×225, 32 spp | 780 ms | 1466 ms | 1.9× |
+| showcase 400×225, 32 spp | 732 ms | 1239 ms | 1.7× |
 | primary rays, 1600×900 | 80 ms | 170 ms | 2.1× |
 
-Each figure is the median of seven runs, interleaved with the C port's. Thread scaling, 400×225 at 32
-spp (median of three):
+The showcase row is a single run, on the scene with the textured planet. The primary-ray row was
+measured on the previous scene (a checkered ball) as the median of seven runs, interleaved with the
+C port's; shading does not enter it. Thread scaling, 400×225 at 32 spp (single runs, planet scene):
 
 | threads | 1 | 2 | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| ms | 1421 | 1032 | 752 | 519 | 430 |
+| ms | 1239 | 747 | 487 | 449 | 379 |
 
 **The rest of the gap is the compiler's.** `Ray` and `Aabb` already travel between sysl functions in
 registers, as LLVM aggregates, and `Aabb.hit` is inlined into `BvhNode.hit` as the C port's box test

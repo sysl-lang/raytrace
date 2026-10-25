@@ -96,6 +96,40 @@ static Tex *checker(double scale, V a, V b) {
     Checker *c = malloc(sizeof *c); c->t.value = checker_value; c->inv = 1.0 / scale;
     c->even = solid(a); c->odd = solid(b); return &c->t;
 }
+/* the planet: assets/make_assets.py's 128x64 image, generated here with the same formulas
+   (eight-bit sRGB, row-major from the top), sampled by (u, v) and converted to linear light */
+#define PW 128
+#define PH 64
+typedef struct { Tex t; int w, h; unsigned char rgb[PW * PH * 3]; } Image;
+static double pymod(double a, double b) { double r = fmod(a, b); return (r != 0 && (r < 0) != (b < 0)) ? r + b : r; }
+static double to_linear(unsigned char b) { double s = (double)b / 255.0; return s * s; }
+static V image_value(const Tex *t, double u, double v, V p) {
+    const Image *m = (const Image *)t;
+    double uu = u < 0 ? 0 : u > 1 ? 1 : u;
+    double vv = 1.0 - (v < 0 ? 0 : v > 1 ? 1 : v);
+    int i = (int)(uu * (double)m->w), j = (int)(vv * (double)m->h);
+    if (i > m->w - 1) i = m->w - 1;
+    if (j > m->h - 1) j = m->h - 1;
+    const unsigned char *px = m->rgb + (j * m->w + i) * 3;
+    return v3(to_linear(px[0]), to_linear(px[1]), to_linear(px[2]));
+}
+static Tex *planet(void) {
+    Image *m = malloc(sizeof *m); m->t.value = image_value; m->w = PW; m->h = PH;
+    const double pi = 3.141592653589793;
+    for (int y = 0; y < PH; y++) {
+        double lat = 90 - (y + 0.5) * 180 / PH;
+        for (int x = 0; x < PW; x++) {
+            double lon = (x + 0.5) * 360 / PW - 180;
+            int land = sin(lon * (pi / 180) * 3) * cos(lat * (pi / 180) * 2) > 0.2;
+            int r = land ? 60 : 20, g = land ? 140 : 60, b = land ? 50 : 170;
+            if (fabs(lat) > 70) { r = 235; g = 240; b = 245; }
+            if (fabs(pymod(lon, 30)) < 1.5 || fabs(pymod(lat, 30)) < 1.5) { r = 250; g = 220; b = 80; }
+            unsigned char *px = m->rgb + (y * PW + x) * 3;
+            px[0] = (unsigned char)r; px[1] = (unsigned char)g; px[2] = (unsigned char)b;
+        }
+    }
+    return &m->t;
+}
 typedef struct { Tex t; V vecs[256]; int px[256], py[256], pz[256]; double scale; } Marble;
 static void perm(Rng *g, int *p) {
     for (int i = 0; i < 256; i++) p[i] = i;
@@ -309,7 +343,7 @@ static Obj *scene(void) {
     items[n++] = sphere(v3(0, 1, 0), v3(0, 1, 0), -0.8, dielectric(1.5));
     items[n++] = sphere(v3(2.2, 1, 0), v3(2.2, 1, 0), 1, metal(v3(0.8, 0.8, 0.85), 0.05));
     items[n++] = sphere(v3(-1.4, 0.5, 2), v3(-1.4, 0.5, 2), 0.5, lambertian(marble(42, 4.0)));
-    items[n++] = sphere(v3(1.3, 0.6, 2.1), v3(1.3, 0.6, 2.1), 0.6, lambertian(checker(0.15, v3(0.1, 0.2, 0.6), v3(0.9, 0.8, 0.2))));
+    items[n++] = sphere(v3(1.3, 0.6, 2.1), v3(1.3, 0.6, 2.1), 0.6, lambertian(planet()));
     items[n++] = sphere(v3(0.1, 0.35, 2.4), v3(0.1, 0.6, 2.4), 0.35, lambertian(solid(v3(0.2, 0.4, 0.9))));
 
     Mat *gold = metal(v3(0.9, 0.7, 0.3), 0.2);
