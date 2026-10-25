@@ -26,3 +26,13 @@ dependencies {
   cairo { git = "github.com/sysl-lang/cairo", version = "0.3.4" }
   png   { git = "github.com/sysl-lang/png", version = "0.2.1" }
 }
+
+// `bench/` is a hand-compiled C benchmark (see the README), not part of the build: the pattern claims the
+// directory so the walk does not warn about it, and `exclude` takes its one file back out.
+c {
+  bench {
+    root    = "bench"
+    sources = ["*.c"]
+    exclude = ["rt.c"]
+  }
+}
