@@ -8,7 +8,7 @@
 package {
   name    = "raytrace"
   version = "0.1.0"
-  sysl    = "0.1.0-alpha.12"
+  sysl    = "0.6.0"
 }
 
 optimization = "2"
@@ -23,6 +23,6 @@ requires {
 // `png` reads the textures and reads back what this program writes; `cairo` encodes the PNGs, the
 // `png` package being a reader only.
 dependencies {
-  cairo { git = "github.com/sysl-lang/cairo", version = "0.3.3" }
-  png   { git = "github.com/sysl-lang/png", version = "0.1.1" }
+  cairo { git = "github.com/sysl-lang/cairo", version = "0.3.4" }
+  png   { git = "github.com/sysl-lang/png", version = "0.2.1" }
 }
