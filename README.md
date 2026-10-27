@@ -80,20 +80,22 @@ whole renderer.
 cc -O2 -o rt-c bench/rt.c -lm && ./rt-c 400 225 32
 ```
 
-Measured on an M-series Mac, single-threaded, with the sysl program built at `optimization = "2"`:
+Measured on an M-series Mac with sysl 0.7.0, single-threaded, with the sysl program built at `optimization = "2"`.
+Each figure is the median of five runs, interleaved with the C port's, at a 1-minute load average of
+3.7 to 4.8 (the machine was not idle):
 
 | | C -O2 | sysl | ratio |
 |---|---|---|---|
-| showcase 400×225, 32 spp | 732 ms | 1239 ms | 1.7× |
-| primary rays, 1600×900 | 80 ms | 170 ms | 2.1× |
+| showcase 400×225, 32 spp | 603 ms | 740 ms | 1.2× |
+| primary rays, 1600×900 | 59 ms | 84 ms | 1.4× |
 
-The showcase row is a single run, on the scene with the textured planet. The primary-ray row was
-measured on the previous scene (a checkered ball) as the median of seven runs, interleaved with the
-C port's; shading does not enter it. Thread scaling, 400×225 at 32 spp (single runs, planet scene):
+Both rows are on the scene with the textured planet; shading does not enter the primary-ray row.
+Thread scaling, 400×225 at 32 spp (median of five runs, sysl only; the 8-thread run was slower than
+the 4-thread one on this loaded machine):
 
 | threads | 1 | 2 | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| ms | 1239 | 747 | 487 | 449 | 379 |
+| ms | 779 | 493 | 327 | 356 | 298 |
 
 **The rest of the gap is the compiler's.** `Ray` and `Aabb` already travel between sysl functions in
 registers, as LLVM aggregates, and `Aabb.hit` is inlined into `BvhNode.hit` as the C port's box test
