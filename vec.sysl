@@ -37,9 +37,9 @@ struct Vec3
     /** The component on axis 0, 1 or 2. */
     axis(self, a: int) -> real = if a == 0 then self.x else if a == 1 then self.y else self.z
 
-    min(self, o: Vec3) -> Vec3 = Vec3(min(self.x, o.x), min(self.y, o.y), min(self.z, o.z))
+    min(self, o: Vec3) -> Vec3 = Vec3(self.x.min(o.x), self.y.min(o.y), self.z.min(o.z))
 
-    max(self, o: Vec3) -> Vec3 = Vec3(max(self.x, o.x), max(self.y, o.y), max(self.z, o.z))
+    max(self, o: Vec3) -> Vec3 = Vec3(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z))
 
     /** `self` mirrored about the surface with normal `n`. */
     reflect(self, n: Vec3) -> Vec3 = self - n * (2.0 * self.dot(n))
@@ -49,7 +49,7 @@ struct Vec3
      * that it is not totally internally reflected.
      */
     refract(self, n: Vec3, eta: real) -> Vec3
-        val cos_theta = min(-self.dot(n), 1.0)
+        val cos_theta = (-self.dot(n)).min(1.0)
         val perp = (self + n * cos_theta) * eta
         val para = n * -(1.0 - perp.length_squared()).abs().sqrt()
 
@@ -108,7 +108,7 @@ struct Interval
 
     universe() -> Interval = Interval(-real.infinity(), real.infinity())
 
-    hull(a: Interval, b: Interval) -> Interval = Interval(min(a.lo, b.lo), max(a.hi, b.hi))
+    hull(a: Interval, b: Interval) -> Interval = Interval(a.lo.min(b.lo), a.hi.max(b.hi))
 
     size(self) -> real = self.hi - self.lo
 

@@ -8,7 +8,7 @@
 package {
   name    = "raytrace"
   version = "0.1.0"
-  sysl    = "0.6.0"
+  sysl    = "0.9.0"
 }
 
 optimization = "2"
@@ -24,7 +24,7 @@ requires {
 // `png` package being a reader only.
 dependencies {
   cairo { git = "github.com/sysl-lang/cairo", version = "0.3.4" }
-  png   { git = "github.com/sysl-lang/png", version = "0.2.1" }
+  png   { git = "github.com/sysl-lang/png", version = "0.2.3" }
 }
 
 // `bench/` is a hand-compiled C benchmark (see the README), not part of the build.

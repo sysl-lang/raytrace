@@ -77,7 +77,7 @@ impl Material for Dielectric
     scatter(self, r_in: Ray, h: Hit, rng: *Rng) -> Option[Scatter]
         val ri = if h.front_face then 1.0 / self.ior else self.ior
         val unit_dir = r_in.dir.unit()
-        val cos_theta = min(-unit_dir.dot(h.normal), 1.0)
+        val cos_theta = (-unit_dir.dot(h.normal)).min(1.0)
         val sin_theta = (1.0 - cos_theta * cos_theta).sqrt()
         val total = ri * sin_theta > 1.0
 

@@ -94,7 +94,7 @@ struct Camera
             ray = sc.ray
 
             if self.s.roulette && depth >= 3
-                val p = min(max(max(through.x, through.y), through.z), 0.95)
+                val p = through.x.max(through.y).max(through.z).min(0.95)
                 if g.unit() >= p then return color
                 through = through / p
 

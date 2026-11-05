@@ -106,7 +106,7 @@ impl Hittable for HitList
         var closest = ray_t.hi
 
         for i in 0..<self.items.len()
-            self.items.at(i).hit(r, Interval(ray_t.lo, closest)) match
+            self.items[i].hit(r, Interval(ray_t.lo, closest)) match
                 Some(h) ->
                     closest = h.t
                     best = Some(h)
@@ -118,5 +118,5 @@ impl Hittable for HitList
     bbox(self) -> Aabb
         var b = Aabb.empty()
         for i in 0..<self.items.len()
-            b = Aabb.hull(b, self.items.at(i).bbox())
+            b = Aabb.hull(b, self.items[i].bbox())
         b

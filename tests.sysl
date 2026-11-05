@@ -193,7 +193,7 @@ bvh_matches_brute_force()
     // the list keeps its own order; the BVH reorders its buffer while building
     val copy: Buf[&sync Hittable] = buf()
     for i in 0..<items.len()
-        copy.push(items.at(i))
+        copy.push(items[i])
 
     val list = HitList(items)
     val tree = bvh(copy)

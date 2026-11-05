@@ -51,7 +51,7 @@ read_obj(text: string, scale: real, offset: Vec3, mat: &sync Material) -> Result
                 idx[k - 1] = usize(resolved)
 
             for k in 1..<idx.len - 1
-                tris.push(Triangle.of(verts.at(idx[0]), verts.at(idx[k]), verts.at(idx[k + 1]), mat))
+                tris.push(Triangle.of(verts[idx[0]], verts[idx[k]], verts[idx[k + 1]], mat))
 
     Ok(tris)
 end read_obj
