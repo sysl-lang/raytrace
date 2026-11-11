@@ -31,7 +31,7 @@ impl Hittable for BvhNode
  */
 bvh(items: Buf[&sync Hittable]) -> &sync Hittable
     if items.len() == 0 then return Nothing()
-    build(items.view())
+    build(items.into_view())
 
 /** The empty scene. */
 struct Nothing

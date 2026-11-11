@@ -109,7 +109,7 @@ png_bytes(img: Rgb8) -> Option[Buf[u8]]
 end png_bytes
 
 /** A PNG read back by `sh.sysl.png`, whatever colour type it was written in. */
-read_png(b: []u8) -> Option[Rgb8]
+read_png(b: []const u8) -> Option[Rgb8]
     val im = png.decode(b).ok()?
     val w = int(im.width)
     val h = int(im.height)

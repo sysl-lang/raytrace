@@ -3,7 +3,7 @@
 import sysl.math.{Float, max, min}
 import sysl.rand.{Rng, rng}
 import sysl.sync.Atomic
-import sysl.threads.{Thread, spawn}
+import sysl.threads.scope
 
 /** Where the camera stands and what it sees through: the lens is a thin one whose aperture is the
  * cone `defocus_angle` degrees wide at the focus plane, `focus_dist` away. An angle of zero is a
@@ -159,17 +159,12 @@ render(world: &sync Hittable, cam: Camera, threads: int) -> []Vec3
         work(&job)
         return pixels
 
-    var pool: []Option[Thread] = [None; threads]
+    val jp = &job
 
-    for i in 0..<threads
-        pool[i] = spawn(&work, &job)
-
-    for t in pool
-        t match
-            Some(th) -> th.join()
-            None -> ()
-
-    // A thread that did not start left its rows to the others; this one finishes whatever is left.
-    work(&job)
+    // The calling thread works too, so a thread that did not start leaves its rows to the others.
+    scope((sc) ->
+        for i in 0..<threads
+            sc.spawn(() -> work(jp))
+        work(jp))
     pixels
 end render
